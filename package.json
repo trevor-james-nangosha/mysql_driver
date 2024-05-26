@@ -1,0 +1,23 @@
+{
+  "name": "mysql_driver",
+  "version": "0.0.1",
+  "description": "A NodeJS client for MySQL",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "tsc index.ts && node ./dist/index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/trevor-james-nangosha/mysql_driver.git"
+  },
+  "author": "Trevor James Nangosha <trevor@nangosha.com>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/trevor-james-nangosha/mysql_driver/issues"
+  },
+  "homepage": "https://github.com/trevor-james-nangosha/mysql_driver#readme",
+  "devDependencies": {
+    "@types/node": "^20.12.12"
+  }
+}
