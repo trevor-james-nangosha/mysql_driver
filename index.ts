@@ -16,6 +16,8 @@ interface ConnectionConfig {
   database: string;
 }
 
+type MySQLSocket = net.Socket
+
 interface ClientCapabilities {}
 
 const parseErrorPacket = (packet: Buffer): ErrorPacket => {
@@ -46,7 +48,7 @@ class MysqlConnection {
   enableSSL = false;
   enableTLS = false;
   body: any[] = [];
-  packetType: string;
+  client: MySQLSocket;
 
   constructor(host: string, user: string, password: string, database: string) {
     this.host = host;
@@ -54,19 +56,17 @@ class MysqlConnection {
     this.password = password;
     this.database = database;
     this.port = 3306;
-    this.packetType = "Ok";
-  }
 
-  connect() {
-    const client = net.createConnection(
-      { port: this.port, host: this.host },
+    this.client = net.createConnection(
+      { port: this.port, host: this.host},
       () => {
         console.log("connected to server");
       }
-    );
+    )
 
-    client.on("data", (data: Buffer) => {
-      console.log(data);
+    this.client.on("data", (data: Buffer) => {
+      console.log(data.toString());
+      console.log("size: ", data.length);
       const errorCode = data.at(4).toString(16);
 
       if (errorCode === "ff") {
@@ -77,20 +77,23 @@ class MysqlConnection {
       console.log("===========");
     });
 
-    client.on("end", () => {
+    this.client.on("end", () => {
       console.log("disconnected from server");
     });
 
-    client.on("error", (err) => {
+    this.client.on("error", (err) => {
+    // for example when we cannot make a connection since the server is down
       console.log("An error has happened.");
     });
 
-    // client.write("Write something")
+    this.client.write("This is the reason")
   }
+
+  connect() { return this.client }
 
   end() {}
 
-  query(sql: string) {}
+  query(sql: string) { }
 }
 
 const createConnection = (config: ConnectionConfig) => {
@@ -112,4 +115,30 @@ const conn = createConnection({
   user: "root",
 });
 
-conn.connect();
+conn.connect()
+// conn.command()
+
+// i seem to be getting an error everytime I write some data
+// is there a specfic order that you are supposed to send packets when sending them to mysql?
+
+// i know for sure that we are able to establish a connection
+// what about we try sending some packets to the server
+
+// here are some possible issues
+// could it be that TCP is coalescing packets. will need wireshark to confirm this
+// it could also be that multiple TCP packets result into one data event which could be giving me issues
+
+
+// maybe i am calling client.write("") before I have registered the data event listener
+
+
+
+// what is the end goal?
+// the end goal is to make a basic sql statement.
+
+// here are some commands in case i  need them
+// sudo service mysql start
+// sudo service mysql stop
+
+// sniff all connections on port 3306 and write them to a file called mysql.pcap
+// tshark -i any -w ~/mysql.pcap tcp port 3306
