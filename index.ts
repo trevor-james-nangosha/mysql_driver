@@ -1,4 +1,7 @@
 import * as net from "node:net";
+import calculateToken from "./auth";
+
+type MySQLSocket = net.Socket
 
 interface ErrorPacket {
   packetLength: number;
@@ -9,6 +12,24 @@ interface ErrorPacket {
   message: string;
 }
 
+interface ServerGreetingPacket{
+  packetLength: number;
+  packetNumber: number;
+  protocolVersion: number;
+  serverVersion: string;
+  threadId: number;
+  seed: string;
+  serverCapabilities: string;
+  serverLanguage: number;
+  serverStatus: number;
+  extendedServerCapabilities: string;
+  authPluginDataLength: number;
+  filler: string;
+  remainderSeed: string;
+  authPluginName: string;
+
+}
+
 interface ConnectionConfig {
   host: string;
   user: string;
@@ -16,9 +37,124 @@ interface ConnectionConfig {
   database: string;
 }
 
-type MySQLSocket = net.Socket
+interface CommandQuery {
+  command: number;
+  query: string;
+}
 
-interface ClientCapabilities {}
+interface CommandChangeUser {
+  command: number;
+  user: string;
+  password: string;
+  database: string;
+}
+
+interface CommandInitDB {
+  command: number;
+  database: string;
+}
+
+interface AuthenticationPacket{
+  clientFlags: ClientFlags;
+  maxPacketSize: number;
+  charsetNumber: number;
+  user: string;
+  scrambleBuff: Buffer;
+  database: string;
+}
+
+interface ClientFlags{
+  clientCapabilities: number;
+  extendedClientCapabilities: number;
+}
+
+const createClientFlags = (): ClientFlags => {
+  // hardcoded: same as server capabilities
+  return {
+    clientCapabilities: 0xa68d,
+    extendedClientCapabilities: 0x19ff,
+  }
+}
+
+const createAuthenticationPacket = (user: string, password: string, scramble: string, database: string) => {
+  let hash = "pjpj"
+
+  let authPacket: AuthenticationPacket = {
+    clientFlags: createClientFlags(),
+    maxPacketSize: 0x1000000, //??????
+    charsetNumber: 0xff,
+    user,
+    scrambleBuff: calculateToken(password, scramble),
+    database,
+  }
+
+  let flagBuff = Buffer.alloc(4);
+  flagBuff.writeUInt16LE(authPacket.clientFlags.clientCapabilities, 0);
+  flagBuff.writeUInt16LE(authPacket.clientFlags.extendedClientCapabilities, 2);
+
+  let maxPacketSizeBuff = Buffer.alloc(4);
+  maxPacketSizeBuff.writeUInt32LE(authPacket.maxPacketSize, 0);
+
+  let charsetNumberBuff = Buffer.alloc(1);
+  charsetNumberBuff.writeUInt8(authPacket.charsetNumber, 0);
+
+  let userBuff = Buffer.from(authPacket.user, "utf-8");
+  let databaseBuff = Buffer.from(authPacket.database, "utf-8");
+
+  let scrambleBuff = Buffer.alloc(authPacket.scrambleBuff.length + 1); // length encoding???
+  scrambleBuff.writeUint8(authPacket.scrambleBuff.length, 0);
+  scrambleBuff.write(authPacket.scrambleBuff, 1);
+
+  
+  console.log("encrypted: ", authPacket.scrambleBuff)
+
+  let packetLength = Buffer.alloc(3);
+  let packetNumber = Buffer.alloc(1);
+  let filler = Buffer.alloc(23);
+
+  let authPluginBuffer = Buffer.from("caching_sha2_password\0");
+
+  packetNumber.writeUInt8(1, 0);
+  packetLength.writeUInt8(32 + userBuff.length + 1 + scrambleBuff.length + databaseBuff.length + 1 + authPluginBuffer.length, 0); // add the 1's for the additional null bytes we are writing into the buffer
+
+  return Buffer.concat([packetLength, packetNumber, flagBuff, maxPacketSizeBuff, charsetNumberBuff, filler, userBuff, Buffer.from([0]), scrambleBuff, databaseBuff, Buffer.from([0]), authPluginBuffer]);
+  // I am getting [Malformed Packet] error. Am I missing some fields?????
+}
+
+const createCommandChangeUser = (packet: CommandChangeUser) => {
+  let command = Buffer.alloc(1);
+  command.writeUInt8(packet.command, 0);
+
+  let user = Buffer.from(packet.user, "utf-8");
+  let password = Buffer.from(packet.password, "utf-8");
+  let database = Buffer.from(packet.database, "utf-8");
+
+  let packetLength = Buffer.alloc(3);
+  let packetNumber = Buffer.alloc(1);
+  let payload = Buffer.concat([command, user, Buffer.from([0]), password, Buffer.from([0]), database, Buffer.from([0])])
+
+  packetNumber.writeUInt8(1, 0); // do not split the packet for now since we have a small payload
+  packetLength.writeUInt8(payload.length, 0);
+
+  return Buffer.concat([packetLength, packetNumber, payload]);
+}
+
+const createCommandQuery = (packet: CommandQuery) => {
+  let command = Buffer.alloc(1);
+  command.writeUInt8(packet.command, 0);
+
+  let query = Buffer.from(packet.query, "utf-8");
+
+  let packetLength = Buffer.alloc(3);
+  let packetNumber = Buffer.alloc(1);
+  let payload = Buffer.concat([command, query])
+
+  packetNumber.writeUInt8(1, 0); // do not split the packet for now since we have a small payload
+  packetLength.writeUInt8(payload.length, 0);
+
+  // console.log("Buffer: ", Buffer.concat([packetLength, packetNumber, payload]))
+  return Buffer.concat([packetLength, packetNumber, payload]);
+}
 
 const parseErrorPacket = (packet: Buffer): ErrorPacket => {
   let packetLength = packet.subarray(0, 3).readUInt8();
@@ -37,6 +173,46 @@ const parseErrorPacket = (packet: Buffer): ErrorPacket => {
     message,
   };
 };
+
+const parseServerGreetingPacket = (packet: Buffer): ServerGreetingPacket => {
+  let packetLength = packet.subarray(0, 3).readUInt8();
+  let packetNumber = packet.subarray(3, 4).readUInt8();
+  let protocolVersion = packet.subarray(4, 5).readUInt8();
+
+  let offset = 5;
+  let index = packet.indexOf(0x00, offset);
+  let serverVersion = packet.subarray(5, index+=1).toString();
+  
+  let threadId = packet.subarray(index, index+=4).readUInt32LE();
+  let seed = packet.subarray(index, index+=9); // this part of the seed also seems to be null-terminated for me
+  let serverCapabilities = packet.subarray(index, index+=2).readUInt16LE().toString(16);
+  let serverLanguage = packet.subarray(index, index+=1).readUInt8();
+  let serverStatus = packet.subarray(index, index+=2).readUint16LE();
+  let extendedServerCapabilities = packet.subarray(index, index+= 2).readUInt16LE().toString(16);;
+  let authPluginDataLength = packet.subarray(index, index+=1).readUInt8();
+  let filler = packet.subarray(index, index += 10);
+  let remainderSeed = packet.subarray(index, index+=13);
+  let authPluginName = packet.subarray(index).toString();
+
+  return {
+    packetLength,
+    packetNumber,
+    protocolVersion,
+    serverVersion,
+    threadId,
+    seed: seed.toString().replace("\0", ""),
+    serverCapabilities,
+    serverLanguage,
+    serverStatus,
+    extendedServerCapabilities,
+    authPluginDataLength,
+    filler: filler.toString(),
+    remainderSeed: remainderSeed.toString().replace("\0", ""),
+    authPluginName,
+  }
+}
+
+const parseServerCapabilites = () => {}
 
 class MysqlConnection {
   host: string;
@@ -65,13 +241,20 @@ class MysqlConnection {
     )
 
     this.client.on("data", (data: Buffer) => {
-      console.log(data.toString());
-      console.log("size: ", data.length);
       const errorCode = data.at(4).toString(16);
 
-      if (errorCode === "ff") {
+      if (errorCode === "a") {
+        let greetingPacket = parseServerGreetingPacket(data)
+        let firstSeed = greetingPacket.seed
+        let secondSeed = greetingPacket.remainderSeed
+        let seed = firstSeed.concat(secondSeed)
+
+        this.sendAuthenticationPacket(seed);        
+      } else if (errorCode === "ff") {
         let errorPacket = parseErrorPacket(data);
-        console.log(JSON.stringify(errorPacket))
+        console.log("Message: ", errorPacket.message)
+      } else if (errorCode === "fe") {
+        console.log("Auth Switch Request")
       }
 
       console.log("===========");
@@ -82,18 +265,25 @@ class MysqlConnection {
     });
 
     this.client.on("error", (err) => {
-    // for example when we cannot make a connection since the server is down
-      console.log("An error has happened.");
+      console.log("Server error: ", err);
     });
-
-    this.client.write("This is the reason")
   }
 
   connect() { return this.client }
 
-  end() {}
+  end() { }
+  
+  sendAuthenticationPacket(seed: string) {
+    // let packet = createCommandChangeUser({ command: 0x11, user: this.user, password: this.password, database: this.database });
 
-  query(sql: string) { }
+    let packet = createAuthenticationPacket(this.user, this.password, seed, this.database);
+    this.client.write(packet);
+  }
+
+  query(sql: string) {
+    let packet = createCommandQuery({ command: 0x03, query: sql });
+    this.client.write(packet);
+  }
 }
 
 const createConnection = (config: ConnectionConfig) => {
@@ -116,20 +306,9 @@ const conn = createConnection({
 });
 
 conn.connect()
-// conn.command()
+//conn.query("insert into students(1, 'trevor');"); // this is failing which means our login was not successful.
 
-// i seem to be getting an error everytime I write some data
-// is there a specfic order that you are supposed to send packets when sending them to mysql?
-
-// i know for sure that we are able to establish a connection
-// what about we try sending some packets to the server
-
-// here are some possible issues
-// could it be that TCP is coalescing packets. will need wireshark to confirm this
-// it could also be that multiple TCP packets result into one data event which could be giving me issues
-
-
-// maybe i am calling client.write("") before I have registered the data event listener
+// the biggest issue is with the password encryption in the authenticationPacket
 
 
 
