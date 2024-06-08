@@ -69,16 +69,13 @@ interface ClientFlags{
 }
 
 const createClientFlags = (): ClientFlags => {
-  // hardcoded: same as server capabilities
   return {
     clientCapabilities: 0xa68d,
-    extendedClientCapabilities: 0x19ff,
+    extendedClientCapabilities: 0x19ef,
   }
 }
 
 const createAuthenticationPacket = (user: string, password: string, scramble: string, database: string) => {
-  let hash = "pjpj"
-
   let authPacket: AuthenticationPacket = {
     clientFlags: createClientFlags(),
     maxPacketSize: 0x1000000, //??????
@@ -101,12 +98,8 @@ const createAuthenticationPacket = (user: string, password: string, scramble: st
   let userBuff = Buffer.from(authPacket.user, "utf-8");
   let databaseBuff = Buffer.from(authPacket.database, "utf-8");
 
-  let scrambleBuff = Buffer.alloc(authPacket.scrambleBuff.length + 1); // length encoding???
-  scrambleBuff.writeUint8(authPacket.scrambleBuff.length, 0);
-  scrambleBuff.write(authPacket.scrambleBuff, 1);
-
-  
-  console.log("encrypted: ", authPacket.scrambleBuff)
+  let scrambleLengthBuff = Buffer.alloc(1); // length encoding???
+  scrambleLengthBuff.writeUint8(authPacket.scrambleBuff.length);
 
   let packetLength = Buffer.alloc(3);
   let packetNumber = Buffer.alloc(1);
@@ -115,9 +108,9 @@ const createAuthenticationPacket = (user: string, password: string, scramble: st
   let authPluginBuffer = Buffer.from("caching_sha2_password\0");
 
   packetNumber.writeUInt8(1, 0);
-  packetLength.writeUInt8(32 + userBuff.length + 1 + scrambleBuff.length + databaseBuff.length + 1 + authPluginBuffer.length, 0); // add the 1's for the additional null bytes we are writing into the buffer
+  packetLength.writeUInt8(32 + userBuff.length + 1 + scrambleLengthBuff.length + authPacket.scrambleBuff.length + databaseBuff.length + 1 + authPluginBuffer.length, 0); // add the 1's for the additional null bytes we are writing into the buffer
 
-  return Buffer.concat([packetLength, packetNumber, flagBuff, maxPacketSizeBuff, charsetNumberBuff, filler, userBuff, Buffer.from([0]), scrambleBuff, databaseBuff, Buffer.from([0]), authPluginBuffer]);
+  return Buffer.concat([packetLength, packetNumber, flagBuff, maxPacketSizeBuff, charsetNumberBuff, filler, userBuff, Buffer.from([0]), scrambleLengthBuff, authPacket.scrambleBuff, databaseBuff, Buffer.from([0]), authPluginBuffer]);
   // I am getting [Malformed Packet] error. Am I missing some fields?????
 }
 
@@ -200,14 +193,14 @@ const parseServerGreetingPacket = (packet: Buffer): ServerGreetingPacket => {
     protocolVersion,
     serverVersion,
     threadId,
-    seed: seed.toString().replace("\0", ""),
+    seed: seed.toString("utf8").replace("\0", ""),
     serverCapabilities,
     serverLanguage,
     serverStatus,
     extendedServerCapabilities,
     authPluginDataLength,
     filler: filler.toString(),
-    remainderSeed: remainderSeed.toString().replace("\0", ""),
+    remainderSeed: remainderSeed.toString("utf8").replace("\0", ""),
     authPluginName,
   }
 }
@@ -241,22 +234,28 @@ class MysqlConnection {
     )
 
     this.client.on("data", (data: Buffer) => {
-      const errorCode = data.at(4).toString(16);
+      const responseCode = data.at(4).toString(16);
 
-      if (errorCode === "a") {
-        let greetingPacket = parseServerGreetingPacket(data)
-        let firstSeed = greetingPacket.seed
-        let secondSeed = greetingPacket.remainderSeed
-        let seed = firstSeed.concat(secondSeed)
+      switch (responseCode) {
+        case "a":
+          let greetingPacket = parseServerGreetingPacket(data)
+          let firstSeed = greetingPacket.seed
+          let secondSeed = greetingPacket.remainderSeed
+          let seed = firstSeed.concat(secondSeed)
 
-        this.sendAuthenticationPacket(seed);        
-      } else if (errorCode === "ff") {
-        let errorPacket = parseErrorPacket(data);
-        console.log("Message: ", errorPacket.message)
-      } else if (errorCode === "fe") {
-        console.log("Auth Switch Request")
+          this.sendAuthenticationPacket(seed); 
+          break;
+        case "ff":
+          let errorPacket = parseErrorPacket(data);
+          console.log("Message: ", errorPacket.message)
+          break
+        case "fe":
+          console.log("Auth Switch Request")
+          break
+        default:
+          break;
       }
-
+      
       console.log("===========");
     });
 
@@ -299,7 +298,7 @@ module.exports = { createConnection };
 
 // demo usage
 const conn = createConnection({
-  host: "localhost",
+  host: "127.0.0.1",
   database: "test",
   password: "dora@2009luv8zZ",
   user: "root",
