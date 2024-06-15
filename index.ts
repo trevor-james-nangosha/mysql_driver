@@ -1,5 +1,6 @@
 import * as net from "node:net";
-import {calculateTokenCaching256, calculateTokenNativePassword} from "./auth";
+import { calculateTokenCaching256, calculateTokenNativePassword } from "./auth";
+import EventEmitter = require("node:events");
 
 type MySQLSocket = net.Socket
 
@@ -90,11 +91,12 @@ interface ClientFlags{
 const createClientFlags = (): ClientFlags => {
   return {
     clientCapabilities: 0xa68d,
-    extendedClientCapabilities: 0x19ef,
+    extendedClientCapabilities: 0x11ef,
   }
 }
 
 const createAuthenticationPacket = (user: string, password: string, scramble: string, database: string) => {
+  console.log("Creating authentication packet")
   let authPacket: AuthenticationPacket = {
     clientFlags: createClientFlags(),
     maxPacketSize: 0x1000000, //??????
@@ -152,6 +154,8 @@ const createCommandChangeUser = (packet: CommandChangeUser) => {
 }
 
 const createCommandQuery = (packet: CommandQuery) => {
+  // I want to pass less stuff during queries, so I will
+  // unset the client_query_attributes flag in the client capabilities
   let command = Buffer.alloc(1);
   command.writeUInt8(packet.command, 0);
 
@@ -161,7 +165,8 @@ const createCommandQuery = (packet: CommandQuery) => {
   let packetNumber = Buffer.alloc(1);
   let payload = Buffer.concat([command, query])
 
-  packetNumber.writeUInt8(1, 0); // do not split the packet for now since we have a small payload
+
+  packetNumber.writeUInt8(0, 0); // do not split the packet for now since we have a small payload, set the packet number to 0 since we are entering "COMMAND" mode
   packetLength.writeUInt8(payload.length, 0);
 
   // console.log("Buffer: ", Buffer.concat([packetLength, packetNumber, payload]))
@@ -259,7 +264,7 @@ const createAuthSwitchResponse = (request: AuthSwitchRequest, password: string) 
   }
 }
 
-class MysqlConnection {
+class MysqlConnection extends EventEmitter {
   host: string;
   user: string;
   password: string;
@@ -273,6 +278,7 @@ class MysqlConnection {
   PHASE = "AUTHENTICATION"
 
   constructor(host: string, user: string, password: string, database: string) {
+    super()
     this.host = host;
     this.user = user;
     this.password = password;
@@ -307,11 +313,12 @@ class MysqlConnection {
           this.sendAuthSwitchResponse(packet)
           break
         default: // OK packet
-          console.log("OK packet received")
+          if (this.PHASE === "AUTHENTICATION") { // this will be set the first OK packet that we get!
+            this.PHASE = "COMMAND" 
+            this.emit("ready")
+          }
           break;
-      }
-      
-      console.log("===========");
+      }     
     });
 
     this.client.on("end", () => {
@@ -319,50 +326,66 @@ class MysqlConnection {
     });
 
     this.client.on("error", (err) => {
-      console.log("Server error: ", err);
+      this.emit("error");
     });
   }
 
-  connect() { return this.client }
+  // connect() { return this.client } // todo; this method needs to be changed to do exactly what it says it does!
 
   end() { }
   
-  sendAuthenticationPacket(seed: string) {
+  private sendAuthenticationPacket(seed: string) {
+    console.log("Sending authentication packet")
     let packet = createAuthenticationPacket(this.user, this.password, seed, this.database);
     this.client.write(packet);
   }
 
-  sendAuthSwitchResponse(packet: Buffer) {
+  private sendAuthSwitchResponse(packet: Buffer) {
     this.client.write(packet)
   }
 
   query(sql: string) {
+    if (this.PHASE === "AUTHENTICATION") throw new Error("Could not execute query statement")
+    
     let packet = createCommandQuery({ command: 0x03, query: sql });
     this.client.write(packet);
   }
 }
 
-const createConnection = (config: ConnectionConfig) => {
-  return new MysqlConnection(
+const createConnection = async (config: ConnectionConfig): Promise<MysqlConnection> => {
+  let conn = new MysqlConnection(
     config.host,
     config.user,
     config.password,
     config.database
   );
+
+  // Approach 1: using events
+  return new Promise((resolve, reject) => {
+    conn.on("ready", () => {
+      resolve(conn);
+    });
+
+    conn.on("error", (reason = "Could not establish connection") => {
+      reject(reason);
+    });
+  })
 };
 
 module.exports = { createConnection };
 
 // demo usage
-const conn = createConnection({
+// todo: use top-level await, I don't love chaining
+createConnection({
   host: "127.0.0.1",
   database: "test",
   password: "dora@2009luv8zZ",
   user: "root",
-});
-
-conn.connect()
-//conn.query("insert into students(1, 'trevor');"); // this is failing which means our login was not successful.
+}).then((conn) => {
+  conn.query("insert into students values(2, 'forest');");
+}).catch((err) => {
+  console.error(err)
+})
 
 // what is the end goal?
-// the end goal is to make a basic sql statement.
+// the end goal is to make a basic sql statement. ✅
