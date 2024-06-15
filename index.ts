@@ -1,7 +1,12 @@
 import * as net from "node:net";
-import calculateToken from "./auth";
+import {calculateTokenCaching256, calculateTokenNativePassword} from "./auth";
 
 type MySQLSocket = net.Socket
+
+let AuthPlugins = {
+  MYSQL_NATIVE_PASSWORD: "mysql_native_password\0", // remove this null byte????
+  CACHING_256_PASSWORD: "caching_256_password"
+}
 
 interface ErrorPacket {
   packetLength: number;
@@ -63,6 +68,20 @@ interface AuthenticationPacket{
   database: string;
 }
 
+interface AuthSwitchRequest{
+  packetLength: number;
+  packetNumber: number;
+  responseCode: string;
+  authPlugin: string;
+  authMethodData: string;
+}
+
+interface AuthSwitchResponse{
+  packetLength: number;
+  packetNumber: number;
+  authMethodData: string
+}
+
 interface ClientFlags{
   clientCapabilities: number;
   extendedClientCapabilities: number;
@@ -81,7 +100,7 @@ const createAuthenticationPacket = (user: string, password: string, scramble: st
     maxPacketSize: 0x1000000, //??????
     charsetNumber: 0xff,
     user,
-    scrambleBuff: calculateToken(password, scramble),
+    scrambleBuff: calculateTokenCaching256(password, scramble),
     database,
   }
 
@@ -205,7 +224,40 @@ const parseServerGreetingPacket = (packet: Buffer): ServerGreetingPacket => {
   }
 }
 
-const parseServerCapabilites = () => {}
+const parseServerCapabilites = () => { }
+
+const parseAuthSwitchRequest = (packet: Buffer): AuthSwitchRequest => {
+  let packetLength = packet.subarray(0, 3).readUInt8();
+  let packetNumber = packet.subarray(3, 4).readUInt8();
+  let responseCode = packet.subarray(4, 5).toString("hex");
+
+  let index = packet.indexOf(0x00, 5); //offset=5
+  let authPlugin = packet.subarray(5, index+=1).toString("utf8"); // get these indexes right
+  let authMethodData = packet.subarray(index).toString("utf8");
+
+  return {
+    packetLength,
+    packetNumber,
+    responseCode,
+    authPlugin,
+    authMethodData,
+  }
+}
+
+const createAuthSwitchResponse = (request: AuthSwitchRequest, password: string) => {
+  switch (request.authPlugin) {
+    case AuthPlugins.MYSQL_NATIVE_PASSWORD:
+      let hashedPassword = calculateTokenNativePassword(password, request.authMethodData.replace("\0", ""))
+      let packetLength = Buffer.alloc(3)
+      let packetNumber = Buffer.alloc(1)
+
+      packetLength.writeUInt8(hashedPassword.length)
+      packetNumber.writeUInt8(3) // be mindful of the ordering of packets!!!
+      return Buffer.concat([packetLength, packetNumber, hashedPassword])
+    default:
+      break;
+  }
+}
 
 class MysqlConnection {
   host: string;
@@ -218,6 +270,7 @@ class MysqlConnection {
   enableTLS = false;
   body: any[] = [];
   client: MySQLSocket;
+  PHASE = "AUTHENTICATION"
 
   constructor(host: string, user: string, password: string, database: string) {
     this.host = host;
@@ -247,12 +300,14 @@ class MysqlConnection {
           break;
         case "ff":
           let errorPacket = parseErrorPacket(data);
-          console.log("Message: ", errorPacket.message)
-          break
+          throw new Error(errorPacket.message);
         case "fe":
-          console.log("Auth Switch Request")
+          let authSwitchRequest = parseAuthSwitchRequest(data)
+          let packet = createAuthSwitchResponse(authSwitchRequest, this.password)
+          this.sendAuthSwitchResponse(packet)
           break
-        default:
+        default: // OK packet
+          console.log("OK packet received")
           break;
       }
       
@@ -273,10 +328,12 @@ class MysqlConnection {
   end() { }
   
   sendAuthenticationPacket(seed: string) {
-    // let packet = createCommandChangeUser({ command: 0x11, user: this.user, password: this.password, database: this.database });
-
     let packet = createAuthenticationPacket(this.user, this.password, seed, this.database);
     this.client.write(packet);
+  }
+
+  sendAuthSwitchResponse(packet: Buffer) {
+    this.client.write(packet)
   }
 
   query(sql: string) {
@@ -307,16 +364,5 @@ const conn = createConnection({
 conn.connect()
 //conn.query("insert into students(1, 'trevor');"); // this is failing which means our login was not successful.
 
-// the biggest issue is with the password encryption in the authenticationPacket
-
-
-
 // what is the end goal?
 // the end goal is to make a basic sql statement.
-
-// here are some commands in case i  need them
-// sudo service mysql start
-// sudo service mysql stop
-
-// sniff all connections on port 3306 and write them to a file called mysql.pcap
-// tshark -i any -w ~/mysql.pcap tcp port 3306
